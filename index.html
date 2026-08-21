@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Mi Agenda</title>
+<link rel="manifest" href="data:application/manifest+json,{%22name%22:%22Mi%20Agenda%22,%22display%22:%22standalone%22,%22start_url%22:%22.%22,%22background_color%22:%22%23F1EDE4%22,%22theme_color%22:%22%231B4965%22}">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { margin:0; -webkit-tap-highlight-color: transparent; }
+  input[type=file]::file-selector-button {
+    border:none; border-radius:8px; padding:8px 12px; margin-right:10px;
+    background:#1B4965; color:#fff; font-size:12px; font-weight:600;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Firebase (módulo) — inicializa y expone en window.fb para que el script de React lo use -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
+  import {
+    getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut
+  } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyD0tXXu7G-wtoNi6P8xy2ifsvR5EJNx2W0",
+    authDomain: "mi-agenda-mfm.firebaseapp.com",
+    projectId: "mi-agenda-mfm",
+    storageBucket: "mi-agenda-mfm.firebasestorage.app",
+    messagingSenderId: "277154901897",
+    appId: "1:277154901897:web:068f3cf303d5a7ddcebb58",
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  window.fb = { auth, db, doc, getDoc, setDoc, deleteDoc, onSnapshot, onAuthStateChanged, signInWithEmailAndPassword, signOut };
+  window.__fbReady = true;
+  if (window.__onFbReady) window.__onFbReady();
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ---------- tokens ---------- */
+const INK = "#1E2A3A";
+const PAPER = "#F1EDE4";
+const CARD = "#FBF9F4";
+const CAT = {
+  laboral: { label: "Laboral", solid: "#1B4965", soft: "#DCE7ED", icon: "💼" },
+  personal: { label: "Personal", solid: "#B5502F", soft: "#F3E1D8", icon: "🧑" },
+  otro: { label: "Otro", solid: "#6B6255", soft: "#E7E3DA", icon: "⚪" },
+};
+const DAY_NAMES = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const DAY_NAMES_FULL = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
+const MONTH_NAMES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Setiembre","Octubre","Noviembre","Diciembre"];
+
+const pad = (n) => String(n).padStart(2, "0");
+const toKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const fromKey = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
+const sameDay = (a, b) => toKey(a) === toKey(b);
+const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+const startOfWeek = (d) => { const r = new Date(d); const dow = (r.getDay() + 6) % 7; return addDays(r, -dow); };
+
+function keysInRange(startKey, endKey) {
+  const out = []; let d = fromKey(startKey); const end = fromKey(endKey); let guard = 0;
+  while (toKey(d) <= toKey(end) && guard < 90) { out.push(toKey(d)); d = addDays(d, 1); guard++; }
+  return out;
+}
+function shortDate(key) { const d = fromKey(key); return `${d.getDate()} ${MONTH_NAMES[d.getMonth()].slice(0, 3).toLowerCase()}`; }
+function formatWhen(ev) {
+  const end = ev.endDate || ev.date;
+  const multiDay = end !== ev.date;
+  const datePart = multiDay ? `${shortDate(ev.date)} – ${shortDate(end)}` : shortDate(ev.date);
+  let timePart = "";
+  if (ev.time && ev.endTime) timePart = `${ev.time}–${ev.endTime}`;
+  else if (ev.time) timePart = ev.time;
+  return timePart ? `${datePart} · ${timePart}` : datePart;
+}
+
+let uidCounter = 0;
+const uid = () => `ev_${Date.now()}_${uidCounter++}`;
+
+/* ---------- compresión de imagen (para caber en Firestore, límite 1MB por documento) ---------- */
+function compressImage(file, maxDim = 1000, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+        else if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ---------- seed ---------- */
+const SEED = [
+  { date: "2026-08-13", time: "13:00", title: "JRC - CORE TECH", location: "", category: "laboral", notes: "", verificar: false },
+  { date: "2026-08-18", endDate: "2026-08-20", time: "", title: "GESS — Feria (C.C. Lima)", location: "Centro de Convenciones de Lima", category: "laboral", notes: "Feria martes a jueves", verificar: false },
+  { date: "2026-08-25", time: "08:00", title: "Desayuno Sectorial", location: "", category: "laboral", notes: "", verificar: false },
+];
+
+/* ---------- storage (Firestore, por usuario) ---------- */
+async function loadEvents(uidUser) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "data", "events");
+  const snap = await window.fb.getDoc(ref);
+  if (snap.exists()) return (snap.data().events || []).map((e) => ({ endDate: e.date, endTime: "", location: "", ...e }));
+  const seeded = SEED.map((s) => ({ ...s, id: uid(), hasPhoto: false }));
+  await window.fb.setDoc(ref, { events: seeded });
+  return seeded;
+}
+function subscribeEvents(uidUser, cb) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "data", "events");
+  return window.fb.onSnapshot(ref, (snap) => {
+    if (snap.exists()) cb((snap.data().events || []).map((e) => ({ endDate: e.date, endTime: "", location: "", ...e })));
+  });
+}
+async function saveEvents(uidUser, events) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "data", "events");
+  try { await window.fb.setDoc(ref, { events }); } catch (e) { console.error(e); }
+}
+async function savePhoto(uidUser, id, dataUrl) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "photos", id);
+  try { await window.fb.setDoc(ref, { data: dataUrl }); } catch (e) { console.error("No se pudo guardar la foto", e); }
+}
+async function loadPhoto(uidUser, id) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "photos", id);
+  try { const snap = await window.fb.getDoc(ref); return snap.exists() ? snap.data().data : null; } catch (e) { return null; }
+}
+async function deletePhoto(uidUser, id) {
+  const ref = window.fb.doc(window.fb.db, "users", uidUser, "photos", id);
+  try { await window.fb.deleteDoc(ref); } catch (e) {}
+}
+function getApiKey() { try { return localStorage.getItem("agenda_api_key") || ""; } catch (e) { return ""; } }
+function setApiKeyLS(k) { try { localStorage.setItem("agenda_api_key", k); } catch (e) {} }
+
+/* ---------- small UI atoms ---------- */
+function CatBadge({ cat }) {
+  const c = CAT[cat] || CAT.otro;
+  return (
+    <span className="inline-flex items-center gap-1 rounded text-[11px] px-1.5 py-0.5 font-medium" style={{ background: c.soft, color: c.solid }}>
+      <span>{c.icon}</span> {c.label}
+    </span>
+  );
+}
+
+function EventRow({ ev, onClick }) {
+  const c = CAT[ev.category] || CAT.otro;
+  return (
+    <button onClick={onClick} className="w-full text-left flex gap-3 rounded-lg py-2.5 pr-3 pl-3 mb-1.5 active:scale-[0.99] transition"
+      style={{ background: CARD, borderLeft: `4px solid ${c.solid}` }}>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-semibold text-[15px] truncate" style={{ color: INK }}>{ev.title}</span>
+          {ev.verificar && <span className="text-xs shrink-0">⚠️</span>}
+        </div>
+        <div className="font-mono text-[11px] mt-0.5" style={{ color: c.solid }}>{formatWhen(ev)}</div>
+        {ev.location && <div className="text-[13px] mt-0.5 truncate" style={{ color: "#5C5647" }}>{ev.location}</div>}
+        <div className="flex items-center gap-1.5 mt-1">
+          <CatBadge cat={ev.category} />
+          {ev.notes && <span className="text-[11px] truncate" style={{ color: "#B5AFA0" }}>{ev.notes}</span>}
+        </div>
+      </div>
+      {ev.hasPhoto && <span className="shrink-0 mt-0.5">🖼</span>}
+    </button>
+  );
+}
+
+/* ---------- Month view ---------- */
+function MonthGrid({ current, events, selectedDay, setSelectedDay, filters }) {
+  const y = current.getFullYear(), m = current.getMonth();
+  const first = new Date(y, m, 1);
+  const gridStart = startOfWeek(first);
+  const weeks = []; let cursor = gridStart;
+  for (let w = 0; w < 6; w++) {
+    const row = []; for (let d = 0; d < 7; d++) { row.push(cursor); cursor = addDays(cursor, 1); }
+    weeks.push(row);
+    if (cursor > addDays(first, 40) && cursor.getMonth() !== m) break;
+  }
+  const today = new Date();
+  const evByDay = {};
+  events.forEach((ev) => {
+    if (!filters[ev.category]) return;
+    keysInRange(ev.date, ev.endDate || ev.date).forEach((k) => { (evByDay[k] = evByDay[k] || []).push(ev); });
+  });
+
+  return (
+    <div>
+      <div className="grid grid-cols-7 mb-1">
+        {DAY_NAMES.map((d) => <div key={d} className="text-center text-[10px] font-mono uppercase tracking-wide py-1" style={{ color: "#8A8377" }}>{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {weeks.flat().map((d, i) => {
+          const inMonth = d.getMonth() === m;
+          const key = toKey(d);
+          const dayEvents = evByDay[key] || [];
+          const isToday = sameDay(d, today);
+          const isSelected = selectedDay && sameDay(d, selectedDay);
+          return (
+            <button key={i} onClick={() => setSelectedDay(d)}
+              className="aspect-square rounded-lg flex flex-col items-center justify-start pt-1 relative transition"
+              style={{ background: isSelected ? "#1B4965" : CARD, opacity: inMonth ? 1 : 0.35, outline: isToday && !isSelected ? "1.5px solid #B5502F" : "none" }}>
+              <span className="font-mono text-[12px]" style={{ color: isSelected ? "#fff" : INK }}>{d.getDate()}</span>
+              <div className="flex gap-0.5 mt-1 flex-wrap justify-center px-0.5">
+                {dayEvents.slice(0, 3).map((ev, idx) => <span key={idx} className="w-1.5 h-1.5 rounded-full" style={{ background: isSelected ? "#fff" : (CAT[ev.category] || CAT.otro).solid }} />)}
+                {dayEvents.length > 3 && <span className="text-[8px] font-mono" style={{ color: isSelected ? "#fff" : "#8A8377" }}>+{dayEvents.length - 3}</span>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Time grid ---------- */
+const FULL_HOURS = Array.from({ length: 17 }, (_, i) => 6 + i);
+const CHIP_H = 30;
+
+function TimedBlock({ ev, hourIndex, hourPx, onClick }) {
+  const c = CAT[ev.category] || CAT.otro;
+  const [h, m] = ev.time.split(":").map(Number);
+  const idx = hourIndex.has(h) ? hourIndex.get(h) : 0;
+  const top = idx * hourPx + (m / 60) * hourPx;
+  const height = Math.max(18, hourPx - 4);
+  const timeLabel = ev.endTime ? `${ev.time}–${ev.endTime}` : ev.time;
+  return (
+    <button onClick={onClick} className="absolute left-0.5 right-0.5 rounded-md text-left px-1.5 py-1 overflow-hidden active:scale-[0.98] transition"
+      style={{ top, height, background: c.soft, borderLeft: `3px solid ${c.solid}`, zIndex: 1 }}>
+      <div className="text-[9px] font-mono leading-tight" style={{ color: c.solid }}>{timeLabel}</div>
+      <div className="text-[10px] font-semibold leading-tight truncate" style={{ color: INK }}>{ev.title}</div>
+      {ev.location && <div className="text-[9px] leading-tight truncate" style={{ color: "#5C5647" }}>{ev.location}</div>}
+      {ev.notes && <div className="text-[8px] leading-tight truncate" style={{ color: "#8A8377" }}>{ev.notes}</div>}
+    </button>
+  );
+}
+
+function AllDayChips({ events, onClick, rows }) {
+  return (
+    <div className="flex flex-col gap-0.5 px-0.5" style={{ height: rows * (CHIP_H + 2) }}>
+      {events.map((ev) => {
+        const c = CAT[ev.category] || CAT.otro;
+        const multiDay = (ev.endDate || ev.date) !== ev.date;
+        return (
+          <button key={ev.id} onClick={() => onClick(ev)} className="text-left rounded px-1.5 py-1 active:scale-[0.98] transition overflow-hidden"
+            style={{ height: CHIP_H, background: c.soft, borderLeft: `3px solid ${c.solid}` }}>
+            <div className="text-[10px] font-semibold leading-tight truncate" style={{ color: INK }}>{ev.title}</div>
+            {multiDay ? <div className="text-[8px] leading-tight truncate" style={{ color: c.solid }}>{shortDate(ev.date)} – {shortDate(ev.endDate)}</div>
+              : ev.notes && <div className="text-[8px] leading-tight truncate" style={{ color: "#8A8377" }}>{ev.notes}</div>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function DayColumn({ timed, onClick, compact, hours, hourIndex, hourPx }) {
+  return (
+    <div className="relative" style={{ width: compact ? 92 : "100%" }}>
+      <div className="relative" style={{ height: hours.length * hourPx }}>
+        {hours.map((h, i) => <div key={h} className="absolute left-0 right-0 border-t" style={{ top: i * hourPx, borderColor: "#E7E1D3" }} />)}
+        {timed.map((ev) => <TimedBlock key={ev.id} ev={ev} hourIndex={hourIndex} hourPx={hourPx} onClick={() => onClick(ev)} />)}
+      </div>
+    </div>
+  );
+}
+
+function TimeGrid({ days, eventsForDay, onEventClick, zoom = 1 }) {
+  const today = new Date();
+  const perDay = days.map((d) => eventsForDay(d));
+  const timedPerDay = perDay.map((evs) => evs.filter((e) => e.time));
+  const allDayPerDay = perDay.map((evs) => evs.filter((e) => !e.time));
+  const maxAllDayRows = Math.max(0, ...allDayPerDay.map((a) => a.length));
+  const hours = FULL_HOURS;
+  const hourPx = Math.round((days.length > 1 ? 46 : 56) * zoom);
+  const hourIndex = new Map(hours.map((h, i) => [h, i]));
+  const allDayBandH = maxAllDayRows > 0 ? maxAllDayRows * (CHIP_H + 2) : 0;
+
+  return (
+    <div className="flex overflow-x-auto -mx-4 px-4">
+      <div className="shrink-0 pr-1 sticky left-0 z-10" style={{ width: 40, background: PAPER }}>
+        <div style={{ height: 28 }} />
+        {allDayBandH > 0 && <div style={{ height: allDayBandH }} />}
+        <div className="relative" style={{ height: hours.length * hourPx }}>
+          {hours.map((h, i) => <div key={h} className="absolute -translate-y-1/2 font-mono text-[10px]" style={{ top: i * hourPx, color: "#8A8377" }}>{pad(h)}:00</div>)}
+        </div>
+      </div>
+      <div className={`flex gap-1 ${days.length === 1 ? "flex-1" : ""}`}>
+        {days.map((d, di) => {
+          const isToday = sameDay(d, today);
+          return (
+            <div key={toKey(d)} style={{ minWidth: days.length === 1 ? "100%" : undefined }}>
+              <div className="text-center mb-1" style={{ height: 28 }}>
+                <div className="font-mono text-[10px] uppercase" style={{ color: isToday ? "#B5502F" : "#8A8377" }}>{DAY_NAMES[(d.getDay() + 6) % 7]}</div>
+                <div className="font-mono text-xs font-semibold" style={{ color: isToday ? "#B5502F" : INK }}>{d.getDate()}</div>
+              </div>
+              {allDayBandH > 0 && <AllDayChips events={allDayPerDay[di]} onClick={onEventClick} rows={maxAllDayRows} />}
+              <DayColumn timed={timedPerDay[di]} onClick={onEventClick} compact={days.length > 1} hours={hours} hourIndex={hourIndex} hourPx={hourPx} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Modal ---------- */
+function EventModal({ initial, onClose, onSave, onDelete, uidUser }) {
+  const [title, setTitle] = useState(initial?.title || "");
+  const [location, setLocation] = useState(initial?.location || "");
+  const [date, setDate] = useState(initial?.date || toKey(new Date()));
+  const [time, setTime] = useState(initial?.time || "");
+  const [endDate, setEndDate] = useState(initial?.endDate || initial?.date || toKey(new Date()));
+  const [endTime, setEndTime] = useState(initial?.endTime || "");
+  const [category, setCategory] = useState(initial?.category || "laboral");
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const [photoChanged, setPhotoChanged] = useState(false);
+  const [loadingPhoto, setLoadingPhoto] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState("");
+  const [apiKey, setApiKeyState] = useState(getApiKey());
+  const [showKeyInput, setShowKeyInput] = useState(false);
+
+  useEffect(() => {
+    if (initial?.hasPhoto) { setLoadingPhoto(true); loadPhoto(uidUser, initial.id).then((p) => { setPhotoPreview(p); setLoadingPhoto(false); }); }
+  }, [initial]);
+
+  const extractFromPhoto = async (dataUrl) => {
+    const key = getApiKey();
+    if (!key) { setShowKeyInput(true); return; }
+    setExtracting(true); setExtractError("");
+    try {
+      const match = dataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.*)$/);
+      if (!match) throw new Error("formato no reconocido");
+      const mediaType = match[1]; const base64 = match[2];
+      const today = toKey(new Date());
+      const prompt = `Esta imagen puede ser una captura de un calendario, una agenda física escrita a mano, una invitación, una tarjeta de presentación o una nota con datos de una cita/evento. Extrae los datos y responde ÚNICAMENTE con un JSON válido (sin backticks, sin texto adicional), con exactamente estas claves: {"title": string, "location": string, "date": "YYYY-MM-DD" o "", "time": "HH:MM" 24h o "", "endDate": "YYYY-MM-DD" o "", "endTime": "HH:MM" o "", "category": "laboral"|"personal"|"otro", "notes": string}. Hoy es ${today}.`;
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+            { type: "text", text: prompt },
+          ]}],
+        }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.message || "error de API");
+      const textBlock = (data.content || []).find((b) => b.type === "text");
+      if (!textBlock) throw new Error("sin respuesta");
+      const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+      if (parsed.title && !title) setTitle(parsed.title);
+      if (parsed.location && !location) setLocation(parsed.location);
+      if (parsed.date) { setDate(parsed.date); setEndDate(parsed.endDate || parsed.date); }
+      if (parsed.time && !time) setTime(parsed.time);
+      if (parsed.endTime && !endTime) setEndTime(parsed.endTime);
+      if (parsed.category && CAT[parsed.category]) setCategory(parsed.category);
+      if (parsed.notes && !notes) setNotes(parsed.notes);
+    } catch (err) {
+      console.error(err);
+      setExtractError("No pude leer la foto automáticamente (" + err.message + "). Llena el formulario a mano — la foto queda adjunta igual.");
+    } finally { setExtracting(false); }
+  };
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const compressed = await compressImage(file);
+      setPhotoPreview(compressed); setPhotoChanged(true);
+      extractFromPhoto(compressed);
+    } catch (err) { console.error(err); }
+  };
+  const removePhoto = () => { setPhotoPreview(null); setPhotoChanged(true); setExtractError(""); };
+  const saveKey = () => { setApiKeyLS(apiKey.trim()); setShowKeyInput(false); };
+
+  const handleSave = () => {
+    if (!title.trim()) return;
+    const finalEndDate = endDate && endDate >= date ? endDate : date;
+    onSave({
+      id: initial?.id || uid(), title: title.trim(), location: location.trim(),
+      date, time, endDate: finalEndDate, endTime: endTime || "", category, notes,
+      verificar: initial?.verificar || false, hasPhoto: !!photoPreview,
+    }, photoChanged ? photoPreview : null, photoChanged);
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col" style={{ background: PAPER }}>
+      <div className="shrink-0 flex items-center justify-between px-4 pt-5 pb-2 border-b" style={{ background: PAPER, borderColor: "#E7E1D3" }}>
+        <button onClick={onClose} className="flex items-center gap-1 py-1.5 pr-2 -ml-1 text-sm font-medium rounded-lg active:opacity-60" style={{ color: INK }}>
+          ‹ Regresar
+        </button>
+        <h2 className="font-semibold text-base" style={{ color: INK }}>{initial ? "Editar evento" : "Nuevo evento"}</h2>
+        <button onClick={onClose} title="Cerrar" className="p-1.5 rounded-lg active:opacity-60" style={{ background: CARD }}>✕</button>
+      </div>
+
+      <div className="px-4 pb-8 pt-3 space-y-3 flex-1">
+        {initial?.verificar && (
+          <div className="flex items-start gap-2 text-xs rounded-lg p-2" style={{ background: "#FBF0D9", color: "#8A6A1E" }}>
+            <span>⚠️</span><span>Este evento viene de una foto/captura y puede tener errores. Corrígelo y guarda para confirmarlo.</span>
+          </div>
+        )}
+
+        <div>
+          <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Título</label>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ej: Reunión con..."
+            className="w-full mt-1 rounded-lg px-3 py-2 text-sm outline-none" style={{ background: CARD, color: INK }} />
+        </div>
+
+        <div>
+          <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Lugar</label>
+          <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Ej: Oficina, Zoom, restaurante..."
+            className="w-full mt-1 rounded-lg px-3 py-2 text-sm outline-none" style={{ background: CARD, color: INK }} />
+        </div>
+
+        <div>
+          <div className="text-xs font-mono uppercase mb-1" style={{ color: "#8A8377" }}>Inicio</div>
+          <div className="flex gap-3">
+            <input type="date" value={date} onChange={(e) => { setDate(e.target.value); if (endDate < e.target.value) setEndDate(e.target.value); }}
+              className="flex-1 rounded-lg px-3 py-2 text-sm outline-none font-mono" style={{ background: CARD, color: INK }} />
+            <input type="time" value={time} onChange={(e) => setTime(e.target.value)}
+              className="w-28 rounded-lg px-3 py-2 text-sm outline-none font-mono" style={{ background: CARD, color: INK }} />
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs font-mono uppercase mb-1" style={{ color: "#8A8377" }}>Fin</div>
+          <div className="flex gap-3">
+            <input type="date" value={endDate} min={date} onChange={(e) => setEndDate(e.target.value)}
+              className="flex-1 rounded-lg px-3 py-2 text-sm outline-none font-mono" style={{ background: CARD, color: INK }} />
+            <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
+              className="w-28 rounded-lg px-3 py-2 text-sm outline-none font-mono" style={{ background: CARD, color: INK }} />
+          </div>
+          <p className="text-[11px] mt-1" style={{ color: "#B5AFA0" }}>Déjalo igual a Inicio si es de un solo día.</p>
+        </div>
+
+        <div>
+          <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Categoría</label>
+          <div className="flex gap-2 mt-1">
+            {Object.entries(CAT).map(([key, c]) => (
+              <button key={key} onClick={() => setCategory(key)}
+                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition"
+                style={{ background: category === key ? c.solid : CARD, color: category === key ? "#fff" : c.solid }}>
+                <span>{c.icon}</span> {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Notas</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Detalles, contacto, lugar..."
+            className="w-full mt-1 rounded-lg px-3 py-2 text-sm outline-none resize-none" style={{ background: CARD, color: INK }} />
+        </div>
+
+        <div>
+          <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Foto (autocompleta el formulario con IA)</label>
+
+          {showKeyInput && (
+            <div className="mt-1 rounded-lg p-3 space-y-2" style={{ background: "#FBF0D9" }}>
+              <p className="text-[11px]" style={{ color: "#8A6A1E" }}>
+                Para autocompletar con IA necesitas tu propia API key de Anthropic (console.anthropic.com). Se guarda solo en este navegador, en tu celular.
+              </p>
+              <input value={apiKey} onChange={(e) => setApiKeyState(e.target.value)} placeholder="sk-ant-..."
+                className="w-full rounded-lg px-3 py-2 text-xs outline-none font-mono" style={{ background: CARD, color: INK }} />
+              <div className="flex gap-2">
+                <button onClick={saveKey} className="flex-1 rounded-lg py-2 text-xs font-medium text-white" style={{ background: "#1B4965" }}>Guardar key</button>
+                <button onClick={() => setShowKeyInput(false)} className="rounded-lg py-2 px-3 text-xs" style={{ background: CARD, color: "#8A8377" }}>Omitir</button>
+              </div>
+            </div>
+          )}
+
+          {loadingPhoto ? (
+            <div className="mt-1 text-xs" style={{ color: "#8A8377" }}>Cargando foto...</div>
+          ) : photoPreview ? (
+            <div className="mt-1">
+              <div className="relative inline-block">
+                <img src={photoPreview} alt="adjunto" className="rounded-lg max-h-40 object-cover" />
+                <button onClick={removePhoto} className="absolute -top-2 -right-2 rounded-full p-1" style={{ background: "#B5502F" }}>
+                  <span className="text-white text-xs px-1">✕</span>
+                </button>
+              </div>
+              {extracting && <p className="text-[11px] mt-1.5" style={{ color: "#1B4965" }}>⏳ Leyendo la foto y llenando el formulario...</p>}
+              {!extracting && extractError && <p className="text-[11px] mt-1.5" style={{ color: "#B5502F" }}>{extractError}</p>}
+            </div>
+          ) : (
+            <div className="mt-1 rounded-lg border border-dashed p-3" style={{ borderColor: "#C7C0B2" }}>
+              <p className="text-xs mb-2" style={{ color: "#8A8377" }}>📷 Elige una foto (cámara o galería)</p>
+              <input type="file" accept="image/*" onChange={handleFile} className="w-full text-xs" style={{ color: "#5C5647" }} />
+              <button onClick={() => setShowKeyInput(true)} className="text-[11px] mt-2 underline" style={{ color: "#8A8377" }}>
+                {getApiKey() ? "Cambiar API key de autocompletado" : "Configurar autocompletado con IA (opcional)"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          {initial && (
+            <button onClick={() => onDelete(initial.id)} className="p-3 rounded-lg" style={{ background: "#F3E1D8" }}>
+              <span style={{ color: "#B5502F" }}>🗑</span>
+            </button>
+          )}
+          <button onClick={handleSave} disabled={!title.trim()}
+            className="flex-1 flex items-center justify-center gap-2 rounded-lg py-3 text-sm font-medium text-white disabled:opacity-40"
+            style={{ background: "#1B4965" }}>
+            ✓ Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- App (ya autenticado) ---------- */
+function App({ uidUser, userEmail, onLogout }) {
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("month");
+  const [current, setCurrent] = useState(new Date());
+  const [selectedDay, setSelectedDay] = useState(new Date());
+  const [modalEvent, setModalEvent] = useState(undefined);
+  const [filters, setFilters] = useState({ laboral: true, personal: true, otro: true });
+  const [zoom, setZoom] = useState(1);
+  const ZOOM_MIN = 0.4, ZOOM_MAX = 1.8;
+
+  useEffect(() => {
+    let unsub = null;
+    loadEvents(uidUser).then(() => {
+      unsub = subscribeEvents(uidUser, (ev) => { setEvents(ev); setLoading(false); });
+    });
+    return () => { if (unsub) unsub(); };
+  }, [uidUser]);
+
+  const resetToSeed = async () => {
+    if (!window.confirm("Esto reemplaza todos los eventos actuales por los datos base. ¿Continuar?")) return;
+    const seeded = SEED.map((s) => ({ ...s, id: uid(), hasPhoto: false }));
+    await saveEvents(uidUser, seeded);
+  };
+
+  const handleSaveEvent = async (ev, photoDataUrl, photoChanged) => {
+    let next;
+    setEvents((prev) => {
+      const exists = prev.some((p) => p.id === ev.id);
+      next = exists ? prev.map((p) => (p.id === ev.id ? { ...ev, verificar: false } : p)) : [...prev, { ...ev, verificar: false }];
+      return next;
+    });
+    await saveEvents(uidUser, next);
+    if (photoChanged) { if (photoDataUrl) await savePhoto(uidUser, ev.id, photoDataUrl); else await deletePhoto(uidUser, ev.id); }
+    setModalEvent(undefined);
+  };
+
+  const handleDeleteEvent = async (id) => {
+    let next;
+    setEvents((prev) => { next = prev.filter((p) => p.id !== id); return next; });
+    await saveEvents(uidUser, next);
+    await deletePhoto(uidUser, id);
+    setModalEvent(undefined);
+  };
+
+  const toggleFilter = (key) => setFilters((f) => ({ ...f, [key]: !f[key] }));
+
+  const isEventOnDay = (ev, d) => { const k = toKey(d); const end = ev.endDate || ev.date; return k >= ev.date && k <= end; };
+  const eventsForDay = (d) => events.filter((ev) => isEventOnDay(ev, d) && filters[ev.category]).sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(current), i));
+
+  const nav = (dir) => {
+    if (view === "month") setCurrent((c) => new Date(c.getFullYear(), c.getMonth() + dir, 1));
+    else if (view === "week") setCurrent((c) => addDays(c, dir * 7));
+    else setSelectedDay((d) => addDays(d, dir));
+  };
+
+  const headerLabel =
+    view === "month" ? `${MONTH_NAMES[current.getMonth()]} ${current.getFullYear()}` :
+    view === "week" ? `${weekDays[0].getDate()} ${MONTH_NAMES[weekDays[0].getMonth()].slice(0,3)} — ${weekDays[6].getDate()} ${MONTH_NAMES[weekDays[6].getMonth()].slice(0,3)}` :
+    `${DAY_NAMES_FULL[(selectedDay.getDay()+6)%7]} ${selectedDay.getDate()} ${MONTH_NAMES[selectedDay.getMonth()]}`;
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER, color: INK }}>Cargando agenda...</div>;
+
+  if (modalEvent !== undefined) {
+    return <EventModal initial={modalEvent} onClose={() => setModalEvent(undefined)} onSave={handleSaveEvent} onDelete={handleDeleteEvent} uidUser={uidUser} />;
+  }
+
+  return (
+    <div className="min-h-screen pb-24" style={{ background: PAPER, fontFamily: "ui-sans-serif, system-ui" }}>
+      <div className="px-4 pt-5 pb-3" style={{ background: PAPER }}>
+        <div className="flex items-center gap-2 mb-3 justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <span>📅</span>
+            <h1 className="font-semibold text-lg truncate" style={{ color: INK }}>Mi Agenda</h1>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={resetToSeed} title="Restaurar datos base" className="p-1.5 rounded-lg" style={{ background: CARD, color: "#8A8377" }}>↺</button>
+            <button onClick={onLogout} title={`Cerrar sesión (${userEmail})`} className="p-1.5 rounded-lg text-xs" style={{ background: CARD, color: "#8A8377" }}>⏻</button>
+          </div>
+        </div>
+
+        <div className="flex rounded-lg p-1 mb-3" style={{ background: "#E7E1D3" }}>
+          {["month", "week", "day"].map((v) => (
+            <button key={v} onClick={() => setView(v)} className="flex-1 py-1.5 rounded-md text-xs font-medium transition"
+              style={{ background: view === v ? CARD : "transparent", color: view === v ? INK : "#8A8377" }}>
+              {v === "month" ? "Mes" : v === "week" ? "Semana" : "Día"}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={() => nav(-1)} className="p-1.5 rounded-lg" style={{ background: CARD, color: INK }}>‹</button>
+          <span className="font-mono text-sm capitalize" style={{ color: INK }}>{headerLabel}</span>
+          <button onClick={() => nav(1)} className="p-1.5 rounded-lg" style={{ background: CARD, color: INK }}>›</button>
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex gap-1.5 flex-wrap">
+            {Object.entries(CAT).map(([key, c]) => (
+              <button key={key} onClick={() => toggleFilter(key)}
+                className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition"
+                style={{ background: filters[key] ? c.soft : "transparent", color: filters[key] ? c.solid : "#B5AFA0", border: `1px solid ${filters[key] ? c.soft : "#DBD5C6"}` }}>
+                <span>{c.icon}</span> {c.label}
+              </button>
+            ))}
+          </div>
+          {(view === "week" || view === "day") && (
+            <div className="flex items-center gap-1 shrink-0 rounded-full px-1 py-1" style={{ background: CARD }}>
+              <button onClick={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - 0.2).toFixed(2)))} className="w-6 h-6 flex items-center justify-center rounded-full font-bold text-sm" style={{ color: INK }}>−</button>
+              <span className="text-[10px] font-mono w-8 text-center" style={{ color: "#8A8377" }}>{Math.round(zoom * 100)}%</span>
+              <button onClick={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + 0.2).toFixed(2)))} className="w-6 h-6 flex items-center justify-center rounded-full font-bold text-sm" style={{ color: INK }}>+</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="px-4">
+        {view === "month" && (
+          <>
+            <MonthGrid current={current} events={events} selectedDay={selectedDay} setSelectedDay={setSelectedDay} filters={filters} />
+            <div className="mt-4">
+              <div className="text-xs font-mono uppercase mb-2" style={{ color: "#8A8377" }}>
+                {DAY_NAMES_FULL[(selectedDay.getDay()+6)%7]} {selectedDay.getDate()} de {MONTH_NAMES[selectedDay.getMonth()]}
+              </div>
+              {eventsForDay(selectedDay).length === 0 ? <p className="text-sm" style={{ color: "#B5AFA0" }}>Sin eventos este día.</p>
+                : eventsForDay(selectedDay).map((ev) => <EventRow key={ev.id} ev={ev} onClick={() => setModalEvent(ev)} />)}
+            </div>
+          </>
+        )}
+
+        {view === "week" && <TimeGrid days={weekDays} eventsForDay={eventsForDay} onEventClick={(ev) => setModalEvent(ev)} zoom={zoom} />}
+
+        {view === "day" && (
+          <>
+            <TimeGrid days={[selectedDay]} eventsForDay={eventsForDay} onEventClick={(ev) => setModalEvent(ev)} zoom={zoom} />
+            <div className="mt-4">
+              {eventsForDay(selectedDay).length === 0 ? <p className="text-sm" style={{ color: "#B5AFA0" }}>Sin eventos este día.</p>
+                : eventsForDay(selectedDay).map((ev) => <EventRow key={ev.id} ev={ev} onClick={() => setModalEvent(ev)} />)}
+            </div>
+          </>
+        )}
+      </div>
+
+      <button onClick={() => setModalEvent(null)} className="fixed bottom-6 right-6 rounded-full p-4 shadow-lg text-2xl text-white" style={{ background: "#1B4965", zIndex: 20 }}>
+        +
+      </button>
+    </div>
+  );
+}
+
+/* ---------- Login ---------- */
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setError(""); setLoading(true);
+    try {
+      await window.fb.signInWithEmailAndPassword(window.fb.auth, email.trim(), password);
+    } catch (err) {
+      setError("No pude iniciar sesión. Revisa tu correo y contraseña.");
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: PAPER }}>
+      <form onSubmit={handleLogin} className="w-full max-w-xs">
+        <div className="text-center mb-6">
+          <div className="text-3xl mb-1">📅</div>
+          <h1 className="font-semibold text-lg" style={{ color: INK }}>Mi Agenda</h1>
+          <p className="text-xs mt-1" style={{ color: "#8A8377" }}>Acceso privado</p>
+        </div>
+        <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Correo</label>
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required
+          className="w-full mt-1 mb-3 rounded-lg px-3 py-2 text-sm outline-none" style={{ background: CARD, color: INK }} />
+        <label className="text-xs font-mono uppercase" style={{ color: "#8A8377" }}>Contraseña</label>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
+          className="w-full mt-1 mb-4 rounded-lg px-3 py-2 text-sm outline-none" style={{ background: CARD, color: INK }} />
+        {error && <p className="text-xs mb-3" style={{ color: "#B5502F" }}>{error}</p>}
+        <button type="submit" disabled={loading}
+          className="w-full rounded-lg py-3 text-sm font-medium text-white disabled:opacity-50" style={{ background: "#1B4965" }}>
+          {loading ? "Entrando..." : "Entrar"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/* ---------- Root: maneja el estado de autenticación ---------- */
+function Root() {
+  const [user, setUser] = useState(undefined); // undefined = cargando, null = sin sesión
+
+  useEffect(() => {
+    const unsub = window.fb.onAuthStateChanged(window.fb.auth, (u) => setUser(u || null));
+    return unsub;
+  }, []);
+
+  if (user === undefined) {
+    return <div className="min-h-screen flex items-center justify-center" style={{ background: PAPER, color: INK }}>Cargando...</div>;
+  }
+  if (user === null) return <LoginScreen />;
+  return <App uidUser={user.uid} userEmail={user.email} onLogout={() => window.fb.signOut(window.fb.auth)} />;
+}
+
+function boot() {
+  ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+}
+if (window.__fbReady) boot(); else window.__onFbReady = boot;
+</script>
+</body>
+</html>
