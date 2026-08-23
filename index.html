@@ -141,6 +141,123 @@ function formatWhen(ev) {
   if (ev.time && ev.endTime) timePart = `${ev.time}–${ev.endTime}`;else if (ev.time) timePart = ev.time;
   return timePart ? `${datePart} · ${timePart}` : datePart;
 }
+const RECUR_LABELS = {
+  none: "No repetir",
+  daily: "Cada día",
+  weekly: "Cada semana",
+  monthly: "Cada mes",
+  yearly: "Cada año"
+};
+function recurrenceLabel(rec) {
+  if (!rec || !rec.freq || rec.freq === "none") return "";
+  const interval = rec.interval || 1;
+  const base = interval === 1 ? RECUR_LABELS[rec.freq] : `Cada ${interval} ${{
+    daily: "días",
+    weekly: "semanas",
+    monthly: "meses",
+    yearly: "años"
+  }[rec.freq]}`;
+  return rec.until ? `${base} (hasta ${shortDate(rec.until)})` : base;
+}
+function occursOnDate(ev, d) {
+  const k = toKey(d);
+  const rec = ev.recurrence;
+  if (!rec || !rec.freq || rec.freq === "none") {
+    const end = ev.endDate || ev.date;
+    return k >= ev.date && k <= end;
+  }
+  if (k < ev.date) return false;
+  if (rec.until && k > rec.until) return false;
+  const start = fromKey(ev.date);
+  const target = fromKey(k);
+  const interval = rec.interval || 1;
+  const MS_DAY = 86400000;
+  if (rec.freq === "daily") {
+    const diffDays = Math.round((target - start) / MS_DAY);
+    return diffDays % interval === 0;
+  }
+  if (rec.freq === "weekly") {
+    if (target.getDay() !== start.getDay()) return false;
+    const diffWeeks = Math.round((target - start) / (7 * MS_DAY));
+    return diffWeeks % interval === 0;
+  }
+  if (rec.freq === "monthly") {
+    if (target.getDate() !== start.getDate()) return false;
+    const diffMonths = (target.getFullYear() - start.getFullYear()) * 12 + (target.getMonth() - start.getMonth());
+    return diffMonths >= 0 && diffMonths % interval === 0;
+  }
+  if (rec.freq === "yearly") {
+    if (target.getDate() !== start.getDate() || target.getMonth() !== start.getMonth()) return false;
+    const diffYears = target.getFullYear() - start.getFullYear();
+    return diffYears >= 0 && diffYears % interval === 0;
+  }
+  return false;
+}
+function timeRangeOf(ev) {
+  const [h, m] = ev.time.split(":").map(Number);
+  let dur = 45;
+  if (ev.endTime) {
+    const [eh, em] = ev.endTime.split(":").map(Number);
+    const s = h * 60 + m,
+      e = eh * 60 + em;
+    if (e > s) dur = e - s;
+  }
+  const start = h * 60 + m;
+  return {
+    start,
+    end: start + dur
+  };
+}
+function findConflicts(candidate, allEvents, targetDate) {
+  if (!candidate.time) return [];
+  const cand = timeRangeOf(candidate);
+  const d = fromKey(targetDate);
+  return allEvents.filter(ev => {
+    if (ev.id === candidate.id || !ev.time) return false;
+    if (!occursOnDate(ev, d)) return false;
+    const r = timeRangeOf(ev);
+    return cand.start < r.end && r.start < cand.end;
+  });
+}
+
+/* reparte eventos que se cruzan en "carriles" lado a lado para la vista semanal/diaria */
+function layoutTimedEvents(events) {
+  const withRange = events.map(ev => ({
+    ev,
+    ...timeRangeOf(ev)
+  })).sort((a, b) => a.start - b.start || a.end - b.end);
+  const clusters = [];
+  let current = [],
+    clusterEnd = -Infinity;
+  withRange.forEach(item => {
+    if (current.length && item.start >= clusterEnd) {
+      clusters.push(current);
+      current = [];
+      clusterEnd = -Infinity;
+    }
+    current.push(item);
+    clusterEnd = Math.max(clusterEnd, item.end);
+  });
+  if (current.length) clusters.push(current);
+  const result = [];
+  clusters.forEach(cluster => {
+    const lanesEnd = [];
+    cluster.forEach(item => {
+      let lane = lanesEnd.findIndex(endT => endT <= item.start);
+      if (lane === -1) {
+        lane = lanesEnd.length;
+        lanesEnd.push(item.end);
+      } else lanesEnd[lane] = item.end;
+      item.lane = lane;
+    });
+    const totalLanes = lanesEnd.length;
+    cluster.forEach(item => result.push({
+      ...item,
+      totalLanes
+    }));
+  });
+  return result;
+}
 let uidCounter = 0;
 const uid = () => `ev_${Date.now()}_${uidCounter++}`;
 
@@ -804,7 +921,7 @@ async function callClaudeExtract(contentBlocks) {
   const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
   return JSON.parse(cleaned);
 }
-const EVENT_EXTRACT_SCHEMA = `{"title": string, "location": string, "date": "YYYY-MM-DD" o "", "time": "HH:MM" 24h o "", "endDate": "YYYY-MM-DD" o "", "endTime": "HH:MM" o "", "category": "laboral"|"personal"|"otro", "notes": string}`;
+const EVENT_EXTRACT_SCHEMA = `{"title": string, "location": string, "date": "YYYY-MM-DD" o "", "time": "HH:MM" 24h o "", "endDate": "YYYY-MM-DD" o "", "endTime": "HH:MM" o "", "category": "laboral"|"personal"|"otro", "notes": string, "recurrence": "none"|"daily"|"weekly"|"monthly"|"yearly" (usa "weekly" si dice "todos los martes", "cada semana", etc; "none" si no se menciona repetición)}`;
 
 /* ---------- dictado por voz (Web Speech API) ---------- */
 function getSpeechRecognition() {
@@ -888,6 +1005,7 @@ function EventRow({
   onClick
 }) {
   const c = CAT[ev.category] || CAT.otro;
+  const recLabel = recurrenceLabel(ev.recurrence);
   return /*#__PURE__*/React.createElement("button", {
     onClick: onClick,
     className: "w-full text-left flex gap-3 rounded-lg py-2.5 pr-3 pl-3 mb-1.5 active:scale-[0.99] transition",
@@ -904,14 +1022,17 @@ function EventRow({
     style: {
       color: INK
     }
-  }, ev.title), ev.verificar && /*#__PURE__*/React.createElement("span", {
+  }, ev.title), recLabel && /*#__PURE__*/React.createElement("span", {
+    className: "text-xs shrink-0",
+    title: recLabel
+  }, "🔁"), ev.verificar && /*#__PURE__*/React.createElement("span", {
     className: "text-xs shrink-0"
   }, "⚠️")), /*#__PURE__*/React.createElement("div", {
     className: "font-mono text-[11px] mt-0.5",
     style: {
       color: c.solid
     }
-  }, formatWhen(ev)), ev.location && /*#__PURE__*/React.createElement("div", {
+  }, formatWhen(ev), recLabel ? ` · ${recLabel}` : ""), ev.location && /*#__PURE__*/React.createElement("div", {
     className: "text-[13px] mt-0.5 truncate",
     style: {
       color: "#5C5647"
@@ -954,12 +1075,11 @@ function MonthGrid({
     if (cursor > addDays(first, 40) && cursor.getMonth() !== m) break;
   }
   const today = new Date();
+  const allDays = weeks.flat();
   const evByDay = {};
-  events.forEach(ev => {
-    if (!filters[ev.category]) return;
-    keysInRange(ev.date, ev.endDate || ev.date).forEach(k => {
-      (evByDay[k] = evByDay[k] || []).push(ev);
-    });
+  allDays.forEach(d => {
+    const k = toKey(d);
+    evByDay[k] = events.filter(ev => filters[ev.category] && occursOnDate(ev, d));
   });
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-7 mb-1"
@@ -1017,6 +1137,8 @@ function TimedBlock({
   ev,
   hourIndex,
   hourPx,
+  lane = 0,
+  totalLanes = 1,
   onClick
 }) {
   const c = CAT[ev.category] || CAT.otro;
@@ -1033,15 +1155,20 @@ function TimedBlock({
   const height = Math.max(20, durationMin / 60 * hourPx - 2);
   const compact = height < 40;
   const timeLabel = ev.endTime ? `${ev.time}–${ev.endTime}` : ev.time;
+  const widthPct = 100 / totalLanes;
+  const leftPct = lane * widthPct;
   return /*#__PURE__*/React.createElement("button", {
     onClick: onClick,
-    className: "absolute left-0.5 right-0.5 rounded-md text-left px-1.5 py-1 overflow-hidden active:scale-[0.98] transition",
+    className: "absolute rounded-md text-left px-1.5 py-1 overflow-hidden active:scale-[0.98] transition",
     style: {
       top,
       height,
+      left: `calc(${leftPct}% + 2px)`,
+      width: `calc(${widthPct}% - 4px)`,
       background: c.soft,
       borderLeft: `3px solid ${c.solid}`,
-      zIndex: 1
+      zIndex: totalLanes > 1 ? 2 : 1,
+      outline: totalLanes > 1 ? "1px solid #FBF9F4" : "none"
     }
   }, compact ? /*#__PURE__*/React.createElement("div", {
     className: "text-[9px] font-semibold leading-tight truncate",
@@ -1123,6 +1250,7 @@ function DayColumn({
   hourIndex,
   hourPx
 }) {
+  const laid = layoutTimedEvents(timed);
   return /*#__PURE__*/React.createElement("div", {
     className: "relative",
     style: {
@@ -1140,12 +1268,14 @@ function DayColumn({
       top: i * hourPx,
       borderColor: "#E7E1D3"
     }
-  })), timed.map(ev => /*#__PURE__*/React.createElement(TimedBlock, {
-    key: ev.id,
-    ev: ev,
+  })), laid.map(item => /*#__PURE__*/React.createElement(TimedBlock, {
+    key: item.ev.id,
+    ev: item.ev,
     hourIndex: hourIndex,
     hourPx: hourPx,
-    onClick: () => onClick(ev)
+    lane: item.lane,
+    totalLanes: item.totalLanes,
+    onClick: () => onClick(item.ev)
   }))));
 }
 function TimeGrid({
@@ -1387,7 +1517,8 @@ function EventModal({
   onClose,
   onSave,
   onDelete,
-  uidUser
+  uidUser,
+  allEvents
 }) {
   const [title, setTitle] = useState(initial?.title || "");
   const [location, setLocation] = useState(initial?.location || "");
@@ -1397,6 +1528,9 @@ function EventModal({
   const [endTime, setEndTime] = useState(initial?.endTime || "");
   const [category, setCategory] = useState(initial?.category || "laboral");
   const [notes, setNotes] = useState(initial?.notes || "");
+  const [recurFreq, setRecurFreq] = useState(initial?.recurrence?.freq || "none");
+  const [recurInterval, setRecurInterval] = useState(initial?.recurrence?.interval || 1);
+  const [recurUntil, setRecurUntil] = useState(initial?.recurrence?.until || "");
   const [photoPreview, setPhotoPreview] = useState(null);
   const [photoChanged, setPhotoChanged] = useState(false);
   const [loadingPhoto, setLoadingPhoto] = useState(false);
@@ -1404,6 +1538,8 @@ function EventModal({
   const [extractError, setExtractError] = useState("");
   const [apiKey, setApiKeyState] = useState(getApiKey());
   const [showKeyInput, setShowKeyInput] = useState(false);
+  const [conflicts, setConflicts] = useState([]);
+  const [conflictAck, setConflictAck] = useState(false);
   useEffect(() => {
     if (initial?.hasPhoto) {
       setLoadingPhoto(true);
@@ -1424,6 +1560,7 @@ function EventModal({
     if (parsed.endTime && !endTime) setEndTime(parsed.endTime);
     if (parsed.category && CAT[parsed.category]) setCategory(parsed.category);
     if (parsed.notes && !notes) setNotes(parsed.notes);
+    if (parsed.recurrence && RECUR_LABELS[parsed.recurrence] && recurFreq === "none") setRecurFreq(parsed.recurrence);
   };
   const extractFromPhoto = async dataUrl => {
     if (!getApiKey()) {
@@ -1503,10 +1640,9 @@ function EventModal({
     setApiKeyLS(apiKey.trim());
     setShowKeyInput(false);
   };
-  const handleSave = () => {
-    if (!title.trim()) return;
+  const buildEvent = () => {
     const finalEndDate = endDate && endDate >= date ? endDate : date;
-    onSave({
+    return {
       id: initial?.id || uid(),
       title: title.trim(),
       location: location.trim(),
@@ -1516,9 +1652,26 @@ function EventModal({
       endTime: endTime || "",
       category,
       notes,
+      recurrence: recurFreq === "none" ? null : {
+        freq: recurFreq,
+        interval: Number(recurInterval) || 1,
+        until: recurUntil || ""
+      },
       verificar: initial?.verificar || false,
       hasPhoto: !!photoPreview
-    }, photoChanged ? photoPreview : null, photoChanged);
+    };
+  };
+  const handleSave = () => {
+    if (!title.trim()) return;
+    const candidate = buildEvent();
+    if (!conflictAck) {
+      const found = time ? findConflicts(candidate, allEvents || [], date) : [];
+      if (found.length > 0) {
+        setConflicts(found);
+        return;
+      }
+    }
+    onSave(candidate, photoChanged ? photoPreview : null, photoChanged);
   };
   return /*#__PURE__*/React.createElement("div", {
     className: "min-h-screen flex flex-col",
@@ -1692,7 +1845,63 @@ function EventModal({
       background: category === key ? c.solid : CARD,
       color: category === key ? "#fff" : c.solid
     }
-  }, /*#__PURE__*/React.createElement("span", null, c.icon), " ", c.label)))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, c.icon), " ", c.label)))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-mono uppercase",
+    style: {
+      color: "#8A8377"
+    }
+  }, "Repetir"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-3 gap-1.5 mt-1"
+  }, Object.entries(RECUR_LABELS).map(([key, label]) => /*#__PURE__*/React.createElement("button", {
+    key: key,
+    onClick: () => setRecurFreq(key),
+    className: "rounded-lg py-2 text-[11px] font-medium transition",
+    style: {
+      background: recurFreq === key ? "#1B4965" : CARD,
+      color: recurFreq === key ? "#fff" : "#5C5647"
+    }
+  }, label))), recurFreq !== "none" && /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2 mt-2 items-center"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs",
+    style: {
+      color: "#8A8377"
+    }
+  }, "Cada"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    value: recurInterval,
+    onChange: e => setRecurInterval(e.target.value),
+    className: "w-14 rounded-lg px-2 py-1.5 text-sm outline-none text-center",
+    style: {
+      background: CARD,
+      color: INK
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs",
+    style: {
+      color: "#8A8377"
+    }
+  }, {
+    daily: "día(s)",
+    weekly: "semana(s)",
+    monthly: "mes(es)",
+    yearly: "año(s)"
+  }[recurFreq]), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs ml-auto",
+    style: {
+      color: "#8A8377"
+    }
+  }, "hasta"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: recurUntil,
+    onChange: e => setRecurUntil(e.target.value),
+    className: "rounded-lg px-2 py-1.5 text-xs outline-none font-mono",
+    style: {
+      background: CARD,
+      color: INK
+    }
+  }))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between"
   }, /*#__PURE__*/React.createElement("label", {
     className: "text-xs font-mono uppercase",
@@ -1815,7 +2024,32 @@ function EventModal({
     style: {
       color: "#8A8377"
     }
-  }, getApiKey() ? "Cambiar API key de autocompletado" : "Configurar autocompletado con IA (opcional)"))), /*#__PURE__*/React.createElement("div", {
+  }, getApiKey() ? "Cambiar API key de autocompletado" : "Configurar autocompletado con IA (opcional)"))), conflicts.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "rounded-lg p-3",
+    style: {
+      background: "#FBF0D9"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs font-medium flex items-center gap-1.5",
+    style: {
+      color: "#8A6A1E"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "⚠️"), " Se cruza con ", conflicts.length === 1 ? "este evento" : "estos eventos", ":"), /*#__PURE__*/React.createElement("ul", {
+    className: "text-[11px] mt-1 ml-5 list-disc",
+    style: {
+      color: "#8A6A1E"
+    }
+  }, conflicts.map(c => /*#__PURE__*/React.createElement("li", {
+    key: c.id
+  }, c.title, " (", c.time, c.endTime ? `–${c.endTime}` : "", ")"))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onSave(buildEvent(), photoChanged ? photoPreview : null, photoChanged);
+    },
+    className: "mt-2 w-full rounded-lg py-2 text-xs font-medium text-white",
+    style: {
+      background: "#B5502F"
+    }
+  }, "Guardar de todas formas")), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 pt-2"
   }, initial && /*#__PURE__*/React.createElement("button", {
     onClick: () => onDelete(initial.id),
@@ -1912,12 +2146,7 @@ function App({
     ...f,
     [key]: !f[key]
   }));
-  const isEventOnDay = (ev, d) => {
-    const k = toKey(d);
-    const end = ev.endDate || ev.date;
-    return k >= ev.date && k <= end;
-  };
-  const eventsForDay = d => events.filter(ev => isEventOnDay(ev, d) && filters[ev.category]).sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+  const eventsForDay = d => events.filter(ev => occursOnDate(ev, d) && filters[ev.category]).sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
   const weekDays = Array.from({
     length: 7
   }, (_, i) => addDays(startOfWeek(current), i));
@@ -1938,7 +2167,8 @@ function App({
       onClose: () => setModalEvent(undefined),
       onSave: handleSaveEvent,
       onDelete: handleDeleteEvent,
-      uidUser: uidUser
+      uidUser: uidUser,
+      allEvents: events
     });
   }
   if (showNotes) {
