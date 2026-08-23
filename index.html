@@ -20,17 +20,12 @@
 <body>
 <div id="root"></div>
 
-<!-- Firebase (módulo) — inicializa y expone en window.fb para que el script de React lo use -->
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
-  import {
-    getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut
-  } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot
-  } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
-
-  const firebaseConfig = {
+<!-- Firebase (versión "compat", sin sintaxis de módulos ES — evita conflicto con el transformador de Babel de abajo) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore-compat.js"></script>
+<script>
+  var firebaseConfig = {
     apiKey: "AIzaSyD0tXXu7G-wtoNi6P8xy2ifsvR5EJNx2W0",
     authDomain: "mi-agenda-mfm.firebaseapp.com",
     projectId: "mi-agenda-mfm",
@@ -38,12 +33,35 @@
     messagingSenderId: "277154901897",
     appId: "1:277154901897:web:068f3cf303d5a7ddcebb58",
   };
+  firebase.initializeApp(firebaseConfig);
+  var authInst = firebase.auth();
+  var dbInst = firebase.firestore();
 
-  const app = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db = getFirestore(app);
+  function docFn(db, ...segments) {
+    var ref = db;
+    for (var i = 0; i < segments.length; i += 2) { ref = ref.collection(segments[i]).doc(segments[i + 1]); }
+    return ref;
+  }
+  async function getDocFn(ref) {
+    var snap = await ref.get();
+    return { exists: function () { return snap.exists; }, data: function () { return snap.data(); } };
+  }
+  async function setDocFn(ref, data) { return ref.set(data); }
+  async function deleteDocFn(ref) { return ref.delete(); }
+  function onSnapshotFn(ref, cb) {
+    return ref.onSnapshot(function (snap) {
+      cb({ exists: function () { return snap.exists; }, data: function () { return snap.data(); } });
+    });
+  }
+  function onAuthStateChangedFn(auth, cb) { return auth.onAuthStateChanged(cb); }
+  function signInFn(auth, email, password) { return auth.signInWithEmailAndPassword(email, password); }
+  function signOutFn(auth) { return auth.signOut(); }
 
-  window.fb = { auth, db, doc, getDoc, setDoc, deleteDoc, onSnapshot, onAuthStateChanged, signInWithEmailAndPassword, signOut };
+  window.fb = {
+    auth: authInst, db: dbInst,
+    doc: docFn, getDoc: getDocFn, setDoc: setDocFn, deleteDoc: deleteDocFn, onSnapshot: onSnapshotFn,
+    onAuthStateChanged: onAuthStateChangedFn, signInWithEmailAndPassword: signInFn, signOut: signOutFn,
+  };
   window.__fbReady = true;
   if (window.__onFbReady) window.__onFbReady();
 </script>
