@@ -90,6 +90,12 @@ const CAT = {
     soft: "#F3E1D8",
     icon: "🧑"
   },
+  feriados: {
+    label: "Feriados",
+    solid: "#2F7A4F",
+    soft: "#DCEEE1",
+    icon: "🌴"
+  },
   otro: {
     label: "Otro",
     solid: "#6B6255",
@@ -316,7 +322,7 @@ const SEED = [{
   time: "",
   title: "Día de la Independencia",
   location: "",
-  category: "otro",
+  category: "feriados",
   notes: "Feriado",
   verificar: false
 }, {
@@ -420,7 +426,7 @@ const SEED = [{
   time: "",
   title: "Batalla de Junín",
   location: "",
-  category: "otro",
+  category: "feriados",
   notes: "Feriado",
   verificar: false
 }, {
@@ -707,7 +713,7 @@ const SEED = [{
   time: "",
   title: "Día de Santa Rosa",
   location: "",
-  category: "otro",
+  category: "feriados",
   notes: "Feriado",
   verificar: false
 }, {
@@ -1369,27 +1375,72 @@ function TimeGrid({
 }
 
 /* ---------- Apuntes (notas libres, texto o voz) ---------- */
+const NOTE_FORMATS = {
+  plain: "Libre",
+  checklist: "Checklist",
+  numbered: "Numerada"
+};
+function noteItems(note) {
+  if (note.items) return note.items;
+  return note.text ? note.text.split("
+").filter(l => l.length > 0).map(t => ({
+    text: t,
+    checked: false
+  })) : [];
+}
 function NoteRow({
   note,
-  onDelete
+  onDelete,
+  onEdit,
+  onToggleItem
 }) {
+  const format = note.format || "plain";
+  const items = noteItems(note);
   return /*#__PURE__*/React.createElement("div", {
-    className: "rounded-lg p-3 mb-2 flex items-start gap-2",
+    className: "rounded-lg p-3 mb-2",
     style: {
       background: CARD
     }
-  }, /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1"
+  }, items.map((item, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: "flex items-start gap-2"
+  }, format === "checklist" && /*#__PURE__*/React.createElement("button", {
+    onClick: () => onToggleItem(note.id, i),
+    className: "shrink-0 mt-0.5 text-sm",
+    style: {
+      color: item.checked ? "#2F7A4F" : "#B5AFA0"
+    }
+  }, item.checked ? "☑" : "☐"), format === "numbered" && /*#__PURE__*/React.createElement("span", {
+    className: "shrink-0 text-sm font-mono",
+    style: {
+      color: "#8A8377"
+    }
+  }, i + 1, "."), /*#__PURE__*/React.createElement("p", {
     className: "flex-1 text-sm whitespace-pre-wrap",
     style: {
-      color: INK
+      color: item.checked ? "#B5AFA0" : INK,
+      textDecoration: item.checked ? "line-through" : "none"
     }
-  }, note.text), /*#__PURE__*/React.createElement("button", {
-    onClick: () => onDelete(note.id),
-    className: "shrink-0 text-xs",
+  }, item.text)))), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-end gap-3 mt-2 pt-2 border-t",
     style: {
-      color: "#B5AFA0"
+      borderColor: "#E7E1D3"
     }
-  }, "🗑"));
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onEdit(note),
+    className: "text-xs flex items-center gap-1",
+    style: {
+      color: "#1B4965"
+    }
+  }, "✏️ Editar"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onDelete(note.id),
+    className: "text-xs flex items-center gap-1",
+    style: {
+      color: "#B5502F"
+    }
+  }, "🗑 Borrar")));
 }
 function NotesScreen({
   uidUser,
@@ -1398,6 +1449,8 @@ function NotesScreen({
   const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
+  const [draftFormat, setDraftFormat] = useState("plain");
+  const [editingId, setEditingId] = useState(null);
   useEffect(() => {
     let unsub = null;
     loadNotes(uidUser).then(() => {
@@ -1410,20 +1463,69 @@ function NotesScreen({
       if (unsub) unsub();
     };
   }, [uidUser]);
-  const voice = useVoiceDictation(text => setDraft(d => (d ? d + " " : "") + text));
-  const addNote = async () => {
-    if (!draft.trim()) return;
-    const next = [{
-      id: uid(),
-      text: draft.trim(),
-      createdAt: Date.now()
-    }, ...notes];
-    setNotes(next);
+  const voice = useVoiceDictation(text => setDraft(d => (d ? d + "
+" : "") + text));
+  const resetDraft = () => {
     setDraft("");
+    setDraftFormat("plain");
+    setEditingId(null);
+  };
+  const saveNote = async () => {
+    if (!draft.trim()) return;
+    const lines = draft.split("
+").filter(l => l.trim().length > 0);
+    let next;
+    if (editingId) {
+      const prevItems = notes.find(n => n.id === editingId)?.items || [];
+      const items = lines.map((text, i) => ({
+        text,
+        checked: prevItems[i]?.checked || false
+      }));
+      next = notes.map(n => n.id === editingId ? {
+        ...n,
+        format: draftFormat,
+        items
+      } : n);
+    } else {
+      const items = lines.map(text => ({
+        text,
+        checked: false
+      }));
+      next = [{
+        id: uid(),
+        format: draftFormat,
+        items,
+        createdAt: Date.now()
+      }, ...notes];
+    }
+    setNotes(next);
+    resetDraft();
     await saveNotes(uidUser, next);
+  };
+  const editNote = note => {
+    setEditingId(note.id);
+    setDraftFormat(note.format || "plain");
+    setDraft(noteItems(note).map(i => i.text).join("
+"));
   };
   const deleteNote = async id => {
     const next = notes.filter(n => n.id !== id);
+    setNotes(next);
+    if (editingId === id) resetDraft();
+    await saveNotes(uidUser, next);
+  };
+  const toggleItem = async (noteId, idx) => {
+    const next = notes.map(n => {
+      if (n.id !== noteId) return n;
+      const items = noteItems(n).map((it, i) => i === idx ? {
+        ...it,
+        checked: !it.checked
+      } : it);
+      return {
+        ...n,
+        items
+      };
+    });
     setNotes(next);
     await saveNotes(uidUser, next);
   };
@@ -1461,15 +1563,39 @@ function NotesScreen({
     style: {
       background: PAPER
     }
-  }, /*#__PURE__*/React.createElement("textarea", {
+  }, editingId && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-1.5"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] font-medium",
+    style: {
+      color: "#1B4965"
+    }
+  }, "✏️ Editando apunte"), /*#__PURE__*/React.createElement("button", {
+    onClick: resetDraft,
+    className: "text-[11px]",
+    style: {
+      color: "#8A8377"
+    }
+  }, "Cancelar")), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5 mb-1.5"
+  }, Object.entries(NOTE_FORMATS).map(([key, label]) => /*#__PURE__*/React.createElement("button", {
+    key: key,
+    onClick: () => setDraftFormat(key),
+    className: "flex-1 rounded-lg py-1.5 text-[11px] font-medium transition",
+    style: {
+      background: draftFormat === key ? "#1B4965" : CARD,
+      color: draftFormat === key ? "#fff" : "#5C5647"
+    }
+  }, label))), /*#__PURE__*/React.createElement("textarea", {
     value: draft,
     onChange: e => setDraft(e.target.value),
-    rows: 3,
-    placeholder: "Escribe una nota, lista o algo que quieras apuntar...",
-    className: "w-full rounded-lg px-3 py-2 text-sm outline-none resize-none",
+    rows: 8,
+    placeholder: draftFormat === "plain" ? "Escribe una nota, lista o algo que quieras apuntar..." : "Un elemento por línea...",
+    className: "w-full rounded-lg px-3 py-2 text-sm outline-none resize-y",
     style: {
       background: CARD,
-      color: INK
+      color: INK,
+      minHeight: 160
     }
   }), voice.interim && /*#__PURE__*/React.createElement("p", {
     className: "text-xs mt-1 italic",
@@ -1486,13 +1612,13 @@ function NotesScreen({
       color: voice.listening ? "#fff" : "#5C5647"
     }
   }, voice.listening ? "⏹ Detener" : "🎤 Dictar"), /*#__PURE__*/React.createElement("button", {
-    onClick: addNote,
+    onClick: saveNote,
     disabled: !draft.trim(),
     className: "flex-1 rounded-lg py-2 text-sm font-medium text-white disabled:opacity-40",
     style: {
       background: "#1B4965"
     }
-  }, "✓ Guardar apunte"))), /*#__PURE__*/React.createElement("div", {
+  }, editingId ? "✓ Guardar cambios" : "✓ Guardar apunte"))), /*#__PURE__*/React.createElement("div", {
     className: "px-4 pb-8 flex-1 overflow-y-auto"
   }, loading ? /*#__PURE__*/React.createElement("p", {
     className: "text-sm",
@@ -1507,7 +1633,9 @@ function NotesScreen({
   }, "Aún no tienes apuntes.") : notes.map(n => /*#__PURE__*/React.createElement(NoteRow, {
     key: n.id,
     note: n,
-    onDelete: deleteNote
+    onDelete: deleteNote,
+    onEdit: editNote,
+    onToggleItem: toggleItem
   }))));
 }
 
@@ -1836,11 +1964,11 @@ function EventModal({
       color: "#8A8377"
     }
   }, "Categoría"), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-2 mt-1"
+    className: "grid grid-cols-2 gap-1.5 mt-1"
   }, Object.entries(CAT).map(([key, c]) => /*#__PURE__*/React.createElement("button", {
     key: key,
     onClick: () => setCategory(key),
-    className: "flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition",
+    className: "flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition",
     style: {
       background: category === key ? c.solid : CARD,
       color: category === key ? "#fff" : c.solid
@@ -2086,6 +2214,7 @@ function App({
   const [filters, setFilters] = useState({
     laboral: true,
     personal: true,
+    feriados: true,
     otro: true
   });
   const [zoom, setZoom] = useState(1);
