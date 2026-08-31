@@ -1382,8 +1382,7 @@ const NOTE_FORMATS = {
 };
 function noteItems(note) {
   if (note.items) return note.items;
-  return note.text ? note.text.split("
-").filter(l => l.length > 0).map(t => ({
+  return note.text ? note.text.split("\n").filter(l => l.length > 0).map(t => ({
     text: t,
     checked: false
   })) : [];
@@ -1463,8 +1462,7 @@ function NotesScreen({
       if (unsub) unsub();
     };
   }, [uidUser]);
-  const voice = useVoiceDictation(text => setDraft(d => (d ? d + "
-" : "") + text));
+  const voice = useVoiceDictation(text => setDraft(d => (d ? d + "\n" : "") + text));
   const resetDraft = () => {
     setDraft("");
     setDraftFormat("plain");
@@ -1472,8 +1470,7 @@ function NotesScreen({
   };
   const saveNote = async () => {
     if (!draft.trim()) return;
-    const lines = draft.split("
-").filter(l => l.trim().length > 0);
+    const lines = draft.split("\n").filter(l => l.trim().length > 0);
     let next;
     if (editingId) {
       const prevItems = notes.find(n => n.id === editingId)?.items || [];
@@ -1505,8 +1502,7 @@ function NotesScreen({
   const editNote = note => {
     setEditingId(note.id);
     setDraftFormat(note.format || "plain");
-    setDraft(noteItems(note).map(i => i.text).join("
-"));
+    setDraft(noteItems(note).map(i => i.text).join("\n"));
   };
   const deleteNote = async id => {
     const next = notes.filter(n => n.id !== id);
